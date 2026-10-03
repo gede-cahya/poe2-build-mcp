@@ -6,6 +6,12 @@ import { findCompatibleSupports } from "../engine/compatibility.js";
 import { exportBuildToFile } from "../engine/exporter.js";
 import { PassivePathfinder } from "../engine/pathfinder.js";
 import { BuildValidator } from "../engine/validator.js";
+import { calculateDps } from "../engine/dps.js";
+import {
+  calculateBuildBudget,
+  fetchLeagues,
+  getMarketPrice,
+} from "../engine/economy.js";
 import type { BuildFile } from "../types.js";
 
 export function registerAllTools(
@@ -72,17 +78,22 @@ export function registerAllTools(
     },
     async (args) => {
       const results = loader.searchGems(args);
-      const summary = results.map((g) => ({
-        id: g.id,
-        name: g.name,
-        type: g.type,
-        color: g.color,
-        craftingLevel: g.craftingLevel,
-        craftingTypes: g.craftingTypes,
-        tags: g.tags,
-        isMeta: g.isMeta,
-        description: g.description ? `${g.description.slice(0, 140)}...` : undefined,
-      }));
+      const summary = results.map((g) => {
+        const iconUrl = `https://poe2db.tw/icon.php?item=${encodeURIComponent(g.name)}`;
+        return {
+          id: g.id,
+          name: g.name,
+          type: g.type,
+          color: g.color,
+          craftingLevel: g.craftingLevel,
+          craftingTypes: g.craftingTypes,
+          tags: g.tags,
+          isMeta: g.isMeta,
+          iconUrl,
+          markdownImage: `![${g.name}](${iconUrl})`,
+          description: g.description ? `${g.description.slice(0, 140)}...` : undefined,
+        };
+      });
 
       return {
         content: [
@@ -128,8 +139,22 @@ export function registerAllTools(
         };
       }
 
+      const iconUrl = `https://poe2db.tw/icon.php?item=${encodeURIComponent(gem.name)}`;
       return {
-        content: [{ type: "text", text: JSON.stringify(gem, null, 2) }],
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                ...gem,
+                iconUrl,
+                markdownImage: `![${gem.name}](${iconUrl})`,
+              },
+              null,
+              2
+            ),
+          },
+        ],
       };
     }
   );
@@ -382,14 +407,23 @@ export function registerAllTools(
     },
     async (args) => {
       const results = loader.searchUniques(args);
+      const mapped = results.map((u) => {
+        const iconUrl = `https://poe2db.tw/icon.php?item=${encodeURIComponent(u.name)}`;
+        return {
+          name: u.name,
+          itemClass: u.itemClass,
+          iconUrl,
+          markdownImage: `![${u.name}](${iconUrl})`,
+        };
+      });
       return {
         content: [
           {
             type: "text",
             text: JSON.stringify(
               {
-                count: results.length,
-                uniques: results,
+                count: mapped.length,
+                uniques: mapped,
               },
               null,
               2
@@ -550,6 +584,138 @@ export function registerAllTools(
         return {
           isError: true,
           content: [{ type: "text", text: `Failed to refresh game data: ${err.message}` }],
+        };
+      }
+    }
+  );
+
+  // 11. poe2_get_market_price
+  server.registerTool(
+    "poe2_get_market_price",
+    {
+      description:
+        "Fetch real-time live market prices, currency exchange ratios (Divine Orb, Mirror of Kalandra, Exalted Orb), and unique item values in Path of Exile 2 leagues (Runes of Aldur, Standard, etc.) via poe2scout API.",
+      inputSchema: z.object({
+        query: z.string().describe("Item or currency name (e.g. 'Mirror of Kalandra', 'Divine Orb', 'Temporalis', 'Chaos Orb')"),
+        league: z.string().optional().default("Runes of Aldur").describe("Target league (e.g. 'Runes of Aldur', 'Standard', 'Forbidden Rites')"),
+      }),
+    },
+    async (args) => {
+      try {
+        const results = await getMarketPrice(args.query, args.league);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  league: args.league,
+                  query: args.query,
+                  totalFound: results.length,
+                  results,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (err: any) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: `Failed to fetch market prices: ${err.message}` }],
+        };
+      }
+    }
+  );
+
+  // 12. poe2_calculate_dps
+  server.registerTool(
+    "poe2_calculate_dps",
+    {
+      description:
+        "Calculate deterministic DPS for PoE2 attack or spell skills based on base damage, flat added damage, % increased damage, more damage multipliers from supports, attack/cast speed, critical strike chance & multiplier, and enemy resistances.",
+      inputSchema: z.object({
+        skillName: z.string().describe("Skill name being evaluated (e.g. 'Earthquake', 'Spark', 'Whirling Blades')"),
+        isSpell: z.boolean().optional().default(false).describe("Whether the skill is a spell (uses cast time instead of attack speed)"),
+        baseDamage: z
+          .object({
+            physical: z.object({ min: z.number(), max: z.number() }).optional(),
+            fire: z.object({ min: z.number(), max: z.number() }).optional(),
+            cold: z.object({ min: z.number(), max: z.number() }).optional(),
+            lightning: z.object({ min: z.number(), max: z.number() }).optional(),
+            chaos: z.object({ min: z.number(), max: z.number() }).optional(),
+          })
+          .optional()
+          .describe("Base weapon or skill damage range breakdown"),
+        addedDamage: z
+          .object({
+            physical: z.object({ min: z.number(), max: z.number() }).optional(),
+            fire: z.object({ min: z.number(), max: z.number() }).optional(),
+            cold: z.object({ min: z.number(), max: z.number() }).optional(),
+            lightning: z.object({ min: z.number(), max: z.number() }).optional(),
+            chaos: z.object({ min: z.number(), max: z.number() }).optional(),
+          })
+          .optional()
+          .describe("Flat added damage from gear or supports"),
+        baseSpeed: z.number().default(1.2).describe("Base attacks per second (for attack) or cast time in seconds (for spell)"),
+        increasedSpeedPercent: z.number().optional().default(0).describe("Total % increased attack or cast speed"),
+        moreSpeedMultiplier: z.number().optional().default(1.0).describe("More speed multiplier (e.g. 1.15 for 15% more)"),
+        increasedDamagePercent: z.number().optional().default(0).describe("Total % increased damage from passive tree and gear"),
+        moreDamageMultipliers: z.array(z.number()).optional().default([]).describe("Array of more damage multipliers from support gems (e.g. [1.35, 1.40])"),
+        baseCritChance: z.number().optional().default(5.0).describe("Base critical strike chance percentage (e.g. 5.0%)"),
+        increasedCritChancePercent: z.number().optional().default(0).describe("Total % increased critical strike chance"),
+        critMultiplierPercent: z.number().optional().default(150).describe("Critical strike multiplier percentage (base is 150%)"),
+        dotBaseDps: z.number().optional().default(0).describe("Base damage over time DPS (Ignite, Bleed, Poison)"),
+        enemyResistancePercent: z.number().optional().default(0).describe("Enemy elemental/chaos resistance percentage (e.g. 0 or 20)"),
+      }),
+    },
+    async (args) => {
+      try {
+        const result = calculateDps(args);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      } catch (err: any) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: `DPS calculation error: ${err.message}` }],
+        };
+      }
+    }
+  );
+
+  // 13. poe2_calculate_build_budget
+  server.registerTool(
+    "poe2_calculate_build_budget",
+    {
+      description:
+        "Calculate total build budget (in Divine Orbs and Exalted Orbs) for a list of unique items and gems using live PoE2 market prices.",
+      inputSchema: z.object({
+        items: z.array(z.string()).describe("List of unique item names or key items needed for the build (e.g. ['Temporalis', 'Voices', 'Bramblejack'])"),
+        league: z.string().optional().default("Runes of Aldur").describe("Target league (e.g. 'Runes of Aldur', 'Standard', 'Forbidden Rites')"),
+      }),
+    },
+    async (args) => {
+      try {
+        const result = await calculateBuildBudget(args.items, args.league);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      } catch (err: any) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: `Build budget calculation error: ${err.message}` }],
         };
       }
     }
