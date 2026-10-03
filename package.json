@@ -1,0 +1,29 @@
+{
+  "name": "poe2-build-mcp",
+  "version": "0.1.0",
+  "description": "MCP server that helps AI assistants design Path of Exile 2 builds using real game data and export them to the in-game Build Planner (.build) format.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "poe2-build-mcp": "src/index.ts"
+  },
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun --watch run src/index.ts",
+    "build": "bun build src/index.ts --target=node --outfile=dist/index.js",
+    "test": "bun test",
+    "refresh-data": "bun run src/index.ts --refresh",
+    "inspect": "npx @modelcontextprotocol/inspector bun run src/index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "@types/node": "^26.6.4",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  }
+}
